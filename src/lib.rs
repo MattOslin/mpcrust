@@ -69,16 +69,14 @@ where
         for i in 0..self.num_stages {
             let x_i = i * n;
             let u_i = i * self.num_controls;
-            self.dynamics.step(
-                &x[x_i..x_i + n],
-                &u[u_i..u_i + self.num_controls],
-                &mut x[x_i + n..x_i + 2 * n],
-            );
+            let (x0, x1) = x[x_i..x_i + 2 * n].split_at_mut(x_i + n);
+            self.dynamics
+                .step(&x0, &u[u_i..u_i + self.num_controls], x1);
         }
         let x = x;
 
-        let mut p_next = &mut Vec::with_capacity(n)[..];
-        let mut p = &mut Vec::with_capacity(n)[..];
+        let mut p_next = Vec::with_capacity(n);
+        let mut p = Vec::with_capacity(n);
         self.cost
             .terminal_grad(&x[n * self.num_stages..n * (self.num_stages + 1)], &mut p);
 
@@ -89,11 +87,9 @@ where
             let u = &u[u_i..u_i + self.num_controls];
             let du = &mut grad[u_i..u_i + self.num_controls];
 
-            p_next.swap_with_slice(p);
+            p_next.swap_with_slice(&mut p);
             self.dynamics.apply_x_grad(x, u, &p_next, &mut p);
-            // p_next used as temp here.
             self.cost.stage_grad_x(x, u, &mut p);
-            let p = p;
             self.dynamics.apply_u_grad(x, u, &p, du);
             self.cost.stage_grad_x(x, u, du);
         }
