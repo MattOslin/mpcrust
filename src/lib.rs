@@ -4,6 +4,7 @@ use optimization_engine::{
     constraints, panoc, FunctionCallResult, Optimizer, Problem, SolverError,
 };
 use std::fmt::Debug;
+use std::ops::AddAssign;
 
 pub mod cost;
 pub mod dynamics;
@@ -55,14 +56,13 @@ where
     DynamicsType: Dynamics<NUM_STATES, NUM_CONROLS>,
     CostType: Cost<NUM_STATES, NUM_CONROLS>,
 {
-    fn cost(&self, u: &[f64], c: &mut f64) -> FunctionCallResult {
-        *c = 0.0;
+    pub fn cost(&self, u: &na::SMatrixSlice<f64, NUM_CONROLS, NUM_STAGES>) -> f64 {
+        let mut c = 0.0;
         // TODO: preallocate?
         let mut x = na::SMatrix::<f64, NUM_STATES, 2>::zeros();
-        let u = na::SMatrixSlice::<f64, NUM_CONROLS, NUM_STAGES>::from_slice(&u);
         x.set_column(0, &self.initial_state);
         for i in 0..NUM_STAGES {
-            *c += self.cost.stage_cost(&x.column(0), &u.column(i));
+            c += self.cost.stage_cost(&x.column(0), &u.column(i));
             let (x0, mut x1) = x.columns_range_pair_mut(0, 1);
             self.dynamics.step(
                 &na::SVectorSlice::<f64, NUM_STATES>::from(x0),
@@ -71,13 +71,15 @@ where
             );
             x.swap_columns(0, 1);
         }
-        *c += self.cost.terminal_cost(&x.column(0));
-        Ok(())
+        c += self.cost.terminal_cost(&x.column(0));
+        c
     }
 
-    fn grad(&self, u: &[f64], grad: &mut [f64]) -> FunctionCallResult {
-        let u = na::SMatrixSlice::<f64, NUM_CONROLS, NUM_STAGES>::from_slice(&u);
-
+    pub fn grad(
+        &self,
+        u: &na::SMatrixSlice<f64, NUM_CONROLS, NUM_STAGES>,
+        grad: &mut na::SMatrixSliceMut<f64, NUM_CONROLS, NUM_STAGES>,
+    ) {
         let x = self.rollout(u);
 
         let mut p = na::SVector::<f64, NUM_STATES>::zeros();
@@ -86,7 +88,6 @@ where
         self.cost
             .terminal_grad(&x.column(NUM_STAGES), &mut p_next.column_mut(0));
 
-        let mut du = na::SVector::<f64, NUM_CONROLS>::zeros();
         let mut jac_x = na::SMatrix::<f64, NUM_STATES, NUM_STATES>::zeros();
         let mut jac_u = na::SMatrix::<f64, NUM_STATES, NUM_CONROLS>::zeros();
         let mut grad_x = na::SVector::<f64, NUM_STATES>::zeros();
@@ -107,18 +108,17 @@ where
                 &mut grad_u.column_mut(0),
             );
 
-            p = jac_x.transpose() * p_next + grad_x;
-            du = jac_u.transpose() * p + grad_u;
-            let u_i = i * NUM_CONROLS;
-            grad[u_i..u_i + NUM_CONROLS].copy_from_slice(du.as_slice());
+            jac_x.tr_mul_to(&p_next, &mut p);
+            p.add_assign(grad_x);
+            jac_u.tr_mul_to(&p, &mut grad.column_mut(i));
+            grad.column_mut(i).add_assign(grad_u);
             std::mem::swap(&mut p_next, &mut p);
         }
-        Ok(())
     }
 
     pub fn rollout(
         &self,
-        u: na::SMatrixSlice<f64, NUM_CONROLS, NUM_STAGES>,
+        u: &na::SMatrixSlice<f64, NUM_CONROLS, NUM_STAGES>,
     ) -> na::SMatrix<f64, NUM_STATES, NUM_STAGES_1> {
         let mut x = na::SMatrix::<f64, NUM_STATES, NUM_STAGES_1>::zeros();
         x.set_column(0, &self.initial_state);
@@ -141,11 +141,20 @@ where
         let lbfgs_memory = 10;
         let max_iters = 1000;
 
-        let problem = Problem::new(
-            &constraints::NoConstraints {},
-            |u: &[f64], grad: &mut [f64]| self.grad(u, grad),
-            |u: &[f64], c: &mut f64| self.cost(u, c),
-        );
+        let cost = |u: &[f64], c: &mut f64| -> FunctionCallResult {
+            let u = na::SMatrixSlice::<f64, NUM_CONROLS, NUM_STAGES>::from_slice(&u);
+            *c = self.cost(&u);
+            Ok(())
+        };
+
+        let grad = |u: &[f64], grad: &mut [f64]| -> FunctionCallResult {
+            let u = na::SMatrixSlice::<f64, NUM_CONROLS, NUM_STAGES>::from_slice(&u);
+            let mut grad = na::SMatrixSliceMut::<f64, NUM_CONROLS, NUM_STAGES>::from_slice(grad);
+            self.grad(&u, &mut grad);
+            Ok(())
+        };
+
+        let problem = Problem::new(&constraints::NoConstraints {}, grad, cost);
         let mut panoc_cache =
             panoc::PANOCCache::new(NUM_CONROLS * NUM_STAGES, tolerance, lbfgs_memory);
         let mut panoc =

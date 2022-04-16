@@ -111,7 +111,7 @@ fn main() {
     dbg!(problem.solve(&mut u));
     dbg!(u);
 
-    let x = problem.rollout(u.fixed_columns(0));
+    let x = problem.rollout(&u.fixed_columns(0));
 
     let mut xs = Vec::with_capacity(101);
     for x in &x.row(0) {
