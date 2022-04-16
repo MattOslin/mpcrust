@@ -1,7 +1,6 @@
-#[macro_use(assert_ulps_eq)]
-extern crate approx;
 use mpcrust::{Cost, Dynamics, MPC};
 use nalgebra as na;
+use plotly::{Plot, Scatter};
 
 // x = [x, y, theta]
 // u = [v, w]
@@ -32,18 +31,20 @@ impl RoombaCost {
 }
 
 const NUM_STATES: usize = 3;
-const NUM_CONROLS: usize = 2;
-type State = na::SVector<f64, NUM_STATES>;
-type Control = na::SVector<f64, NUM_CONROLS>;
+const NUM_CONTROLS: usize = 2;
+type State<'a> = na::SVectorSlice<'a, f64, NUM_STATES>;
+type Control<'a> = na::SVectorSlice<'a, f64, NUM_CONTROLS>;
+type StateMut<'a> = na::SVectorSliceMut<'a, f64, NUM_STATES>;
+type ControlMut<'a> = na::SVectorSliceMut<'a, f64, NUM_CONTROLS>;
 
-impl Cost<NUM_STATES, NUM_CONROLS> for RoombaCost {
+impl Cost<NUM_STATES, NUM_CONTROLS> for RoombaCost {
     fn stage_cost(&self, x: &State, u: &Control) -> f64 {
         0.5 * (self.a * x[1] * x[1]
             + self.b * x[2] * x[2]
             + self.c * u[0] * u[0]
             + self.d * u[1] * u[1])
     }
-    fn stage_grad(&self, x: &State, u: &Control, grad_x: &mut State, grad_u: &mut Control) {
+    fn stage_grad(&self, x: &State, u: &Control, grad_x: &mut StateMut, grad_u: &mut ControlMut) {
         grad_x[1] = self.a * x[1];
         grad_x[2] = self.b * x[2];
 
@@ -55,7 +56,7 @@ impl Cost<NUM_STATES, NUM_CONROLS> for RoombaCost {
             + self.b * x[2] * x[2]
             + self.e * (x[0] - self.x_star) * (x[0] - self.x_star))
     }
-    fn terminal_grad(&self, x: &State, grad: &mut State) {
+    fn terminal_grad(&self, x: &State, grad: &mut StateMut) {
         grad[0] = self.e * (x[0] - self.x_star);
         grad[1] = self.a * x[1];
         grad[2] = self.b * x[2];
@@ -64,8 +65,8 @@ impl Cost<NUM_STATES, NUM_CONROLS> for RoombaCost {
 
 struct RoombaDynamics {}
 
-impl Dynamics<NUM_STATES, NUM_CONROLS> for RoombaDynamics {
-    fn step(&self, x: &State, u: &Control, x_next: &mut State) {
+impl Dynamics<NUM_STATES, NUM_CONTROLS> for RoombaDynamics {
+    fn step(&self, x: &State, u: &Control, x_next: &mut StateMut) {
         x_next[0] = x[0] + u[0] * x[2].cos();
         x_next[1] = x[1] + u[0] * x[2].sin();
         x_next[2] = x[2] + u[1];
@@ -75,8 +76,8 @@ impl Dynamics<NUM_STATES, NUM_CONROLS> for RoombaDynamics {
         x: &State,
         u: &Control,
         _x_next: &State,
-        jac_x: &mut na::SMatrix<f64, NUM_STATES, NUM_STATES>,
-        jac_u: &mut na::SMatrix<f64, NUM_STATES, NUM_CONROLS>,
+        jac_x: &mut na::SMatrixSliceMut<f64, NUM_STATES, NUM_STATES>,
+        jac_u: &mut na::SMatrixSliceMut<f64, NUM_STATES, NUM_CONTROLS>,
     ) {
         let s = x[2].sin();
         let c = x[2].cos();
@@ -101,12 +102,30 @@ impl Dynamics<NUM_STATES, NUM_CONROLS> for RoombaDynamics {
 }
 
 fn main() {
-    let problem = MPC::<NUM_STATES, NUM_CONROLS, 100, 101, RoombaDynamics, RoombaCost> {
-        initial_state: State::new(0., 1., 0.),
+    let problem = MPC::<NUM_STATES, NUM_CONTROLS, 100, 101, RoombaDynamics, RoombaCost> {
+        initial_state: na::SVector::<f64, NUM_STATES>::new(0., 1., 0.),
         dynamics: RoombaDynamics {},
         cost: RoombaCost::new(10.),
     };
-    let mut u = na::SMatrix::<f64, NUM_CONROLS, 100>::zeros();
+    let mut u = na::SMatrix::<f64, NUM_CONTROLS, 100>::zeros();
     dbg!(problem.solve(&mut u));
     dbg!(u);
+
+    let x = problem.rollout(u.fixed_columns(0));
+
+    let mut xs = Vec::with_capacity(101);
+    for x in &x.row(0) {
+        xs.push(*x);
+    }
+
+    let mut ys = Vec::with_capacity(101);
+    for y in &x.row(1) {
+        ys.push(*y);
+    }
+
+    let trace = Scatter::new(xs, ys).name("path");
+
+    let mut plot = Plot::new();
+    plot.add_trace(trace);
+    plot.to_html("/home/moslin/plots/plot.html");
 }

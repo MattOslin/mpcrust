@@ -58,35 +58,33 @@ where
     fn cost(&self, u: &[f64], c: &mut f64) -> FunctionCallResult {
         *c = 0.0;
         // TODO: preallocate?
-        let mut x = self.initial_state.clone();
-        let mut x_next = na::SVector::<f64, NUM_STATES>::zeros();
+        let mut x = na::SMatrix::<f64, NUM_STATES, 2>::zeros();
+        let u = na::SMatrixSlice::<f64, NUM_CONROLS, NUM_STAGES>::from_slice(&u);
+        x.set_column(0, &self.initial_state);
         for i in 0..NUM_STAGES {
-            let u_i = i * NUM_CONROLS;
-            let u = na::SVector::<f64, NUM_CONROLS>::from_column_slice(&u[u_i..u_i + NUM_CONROLS]);
-            *c += self.cost.stage_cost(&x, &u);
-            self.dynamics.step(&x, &u, &mut x_next);
-            std::mem::swap(&mut x, &mut x_next);
+            *c += self.cost.stage_cost(&x.column(0), &u.column(i));
+            let (x0, mut x1) = x.columns_range_pair_mut(0, 1);
+            self.dynamics.step(
+                &na::SVectorSlice::<f64, NUM_STATES>::from(x0),
+                &u.column(i),
+                &mut x1,
+            );
+            x.swap_columns(0, 1);
         }
-        *c += self.cost.terminal_cost(&x);
+        *c += self.cost.terminal_cost(&x.column(0));
         Ok(())
     }
 
     fn grad(&self, u: &[f64], grad: &mut [f64]) -> FunctionCallResult {
-        // TODO: Cache x allocation?
-        let mut x = [na::SVector::<f64, NUM_STATES>::zeros(); NUM_STAGES_1];
-        x[0] = self.initial_state;
-        for i in 0..NUM_STAGES {
-            let u_i = i * NUM_CONROLS;
-            let u = na::SVector::<f64, NUM_CONROLS>::from_column_slice(&u[u_i..u_i + NUM_CONROLS]);
-            let (x_0, x_1) = x[i..i + 2].split_at_mut(1);
-            self.dynamics.step(&x_0[0], &u, &mut x_1[0]);
-        }
-        let x = x;
+        let u = na::SMatrixSlice::<f64, NUM_CONROLS, NUM_STAGES>::from_slice(&u);
+
+        let x = self.rollout(u);
 
         let mut p = na::SVector::<f64, NUM_STATES>::zeros();
         let mut p_next = na::SVector::<f64, NUM_STATES>::zeros();
 
-        self.cost.terminal_grad(&x[NUM_STAGES], &mut p_next);
+        self.cost
+            .terminal_grad(&x.column(NUM_STAGES), &mut p_next.column_mut(0));
 
         let mut du = na::SVector::<f64, NUM_CONROLS>::zeros();
         let mut jac_x = na::SMatrix::<f64, NUM_STATES, NUM_STATES>::zeros();
@@ -95,19 +93,44 @@ where
         let mut grad_u = na::SVector::<f64, NUM_CONROLS>::zeros();
 
         for i in (0..NUM_STAGES).rev() {
-            let u_i = i * NUM_CONROLS;
-            let u = na::SVector::<f64, NUM_CONROLS>::from_column_slice(&u[u_i..u_i + NUM_CONROLS]);
-
-            self.dynamics
-                .jac(&x[i], &u, &x[i + 1], &mut jac_x, &mut jac_u);
-            self.cost.stage_grad(&x[i], &u, &mut grad_x, &mut grad_u);
+            self.dynamics.jac(
+                &x.column(i),
+                &u.column(i),
+                &x.column(i + 1),
+                &mut jac_x.fixed_columns_mut(0),
+                &mut jac_u.fixed_columns_mut(0),
+            );
+            self.cost.stage_grad(
+                &x.column(i),
+                &u.column(i),
+                &mut grad_x.column_mut(0),
+                &mut grad_u.column_mut(0),
+            );
 
             p = jac_x.transpose() * p_next + grad_x;
             du = jac_u.transpose() * p + grad_u;
+            let u_i = i * NUM_CONROLS;
             grad[u_i..u_i + NUM_CONROLS].copy_from_slice(du.as_slice());
             std::mem::swap(&mut p_next, &mut p);
         }
         Ok(())
+    }
+
+    pub fn rollout(
+        &self,
+        u: na::SMatrixSlice<f64, NUM_CONROLS, NUM_STAGES>,
+    ) -> na::SMatrix<f64, NUM_STATES, NUM_STAGES_1> {
+        let mut x = na::SMatrix::<f64, NUM_STATES, NUM_STAGES_1>::zeros();
+        x.set_column(0, &self.initial_state);
+        for i in 0..NUM_STAGES {
+            let (x0, mut x1) = x.columns_range_pair_mut(i, i + 1);
+            self.dynamics.step(
+                &na::SVectorSlice::<f64, NUM_STATES>::from(x0),
+                &u.column(i),
+                &mut x1,
+            );
+        }
+        x
     }
 
     pub fn solve(
@@ -116,7 +139,7 @@ where
     ) -> Result<SolverStatus, SolverError> {
         let tolerance = 1e-14;
         let lbfgs_memory = 10;
-        let max_iters = 80;
+        let max_iters = 1000;
 
         let problem = Problem::new(
             &constraints::NoConstraints {},

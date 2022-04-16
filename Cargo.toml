@@ -8,4 +8,4 @@ edition = "2021"
 [dependencies]
 optimization_engine = "0.7.4"
 nalgebra = "0.30.1"
-approx = "0.5.1"
+plotly = "0.6.0"
